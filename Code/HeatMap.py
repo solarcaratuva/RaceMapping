@@ -5,21 +5,24 @@ import sys
 import utm
 import random
 import copy
+import traceback
+import numpy as np
+from scipy.interpolate import griddata
 
 class HeatMap:
     def __init__(
         self,
-        filterMatrix,
         originalTrack,
         originalTrack_name: str,
         heatMap,
         dataType: str,
         bottom_range,
         top_range,
-        output_file
+        output_file,
+        img_name
     ):
         self.CSV_PATH = originalTrack
-        self.filterMatrix = []
+        self.filterMatrix = list(list())
         self.originalTrack = originalTrack
         self.originalTrack_name = originalTrack_name
         self.output_file = output_file
@@ -31,12 +34,13 @@ class HeatMap:
         self.column_count = 0
         self.bottom_range = bottom_range
         self.top_range = top_range
-        self.filterMatrix = self.filterMatrix
         self.width = 0
         self.height = 0
+        self.img_name = img_name
+
         
-        self.CSV_to_MATRIX()
         self.create_matrix()
+        self.CSV_to_MATRIX()
 
     # Creates a list of [0, 0] for all pixels.
     # Saves leftmost bound, topmost bound, row count, and column count.
@@ -55,8 +59,7 @@ class HeatMap:
                 if row[0] == '1':
                     self.left_bound = float(row[1])
                     self.top_bound = float(row[2])
-                    print(self.left_bound)
-                    print(self.top_bound)
+
 
         CSV_CONVERTED_2D.pop()  # Exclude header row
         self.column_count = len(CSV_CONVERTED_2D) // self.row_count
@@ -65,17 +68,31 @@ class HeatMap:
 
     def create_filter(self, twod_array):
         new_array = copy.deepcopy(twod_array)
-
-        for y in range(0, len(new_array)):
-            for x in range(0, len(new_array[0])):
-                new_array[y][x] = self.spread(new_array, y, x)
+        for y in range(len(twod_array)):
+            for x in range(len(twod_array[0])):
+                new_array[y][x] = self.spread(twod_array, y, x)
+        self.filterMatrix = new_array
+        self.set_range_from_matrix(new_array)
         return new_array
 
-    # Deprecated function: converts CSV to Matrix for parsing.
+    
+    @staticmethod
+    def spread(twod_array, y, x):
+        total = 0.0
+        weight_sum = 0.0
+        for i in range(x - 2, x + 3):
+            for j in range(y - 2, y + 3):
+                if 0 <= i < len(twod_array[0]) and 0 <= j < len(twod_array):
+                    w = math.pow(2, -0.5 * (abs(i - x) + abs(j - y)))
+                    total += twod_array[j][i] * w
+                    weight_sum += w
+        return total / weight_sum
+
+    
     def CSV_to_MATRIX(self):
-        print("Deprecated function: CSV_TO_MATRIX")
         with open(self.CSV_PATH, "r", newline="") as f:
             rows = [row for row in csv.reader(f) if row]
+
         max_col = 0
         max_row = 0
         if not rows:
@@ -88,15 +105,22 @@ class HeatMap:
                     max_col = max(int(row[5]), max_col)
                     max_row = max(int(row[6]), max_row)
             except Exception as e:
-                print(e)
+                pass
+        with Image.open(self.img_name) as img:
+            max_row = max(max_row, img.size[0] - 1)
+            max_col = max(max_col, img.size[1] - 1)
         matrix = [
             [None for _ in range(max_col + 1)]
             for _ in range(max_row + 1)
         ]
+        
+        self.row_count = max_row + 1
+        self.column_count = max_col + 1
 
         for row in rows:
             try:
                 if type(int(row[0])) != type("str"):
+                    #change depending on the csv file
                     x = float(row[1])
                     y = float(row[2])
                     col = int(row[5])
@@ -112,146 +136,93 @@ class HeatMap:
         utm_lat_lon = utm.from_latlon(lat, lon)
         easting, northing = utm_lat_lon[0], utm_lat_lon[1]
         
+        
         row_location = -(northing - self.top_bound) / 3
         column_location = (easting - self.left_bound) / 3
         row_location = int(row_location // 1)
         column_location = int(column_location // 1)
 
-        location = (int(row_location), int(column_location))
 
-        return location
+        if 0 <= column_location < self.row_count and 0 <= row_location < self.column_count:
 
-    def matrix_test(
-        self,
-        output_path="perimeter.png",
-        size_percentage=1.0
-    ):
+            return (int(column_location), int(row_location))
+        else:
+            return (None, None)
+
+
+    def matrix_test(self, path_elevation=None):
         matrix = self.filterMatrix
         if not matrix:
             print("Empty matrix")
             return []
 
-        rows = len(matrix)
-        cols = max(len(row) for row in matrix)
+        rows, cols = len(matrix), len(matrix[0])
 
-        center_r = (rows - 1) / 2
-        center_c = (cols - 1) / 2
-        radius = ((min(rows, cols) - 1) / 2) * size_percentage
+        if path_elevation:
+            points = {}
+            with open(path_elevation, "r", newline="", encoding="utf-8-sig") as f:
+                reader = csv.reader(f)
+                next(reader, None)  # skip header
 
-        for r in range(rows):
-            for c in range(len(matrix[r])):
-                matrix[r][c] = random.randint(
-                    self.bottom_range,
-                    self.top_range
-                )
+                for row in reader:
+                    if not row:
+                        continue
+                    elevation = float(row[1])
+                    lon = float(row[2])
+                    lat = float(row[3])
 
+                    r, c = self.coordinate_finder(lat, lon)
+                    if r is None or c is None or r >= rows or c >= cols:
+                        continue
+                    points[(r, c)] = elevation
+
+            print("Placed", len(points), "points")
+            if not points:
+                print("No points landed in the matrix; check bounds/coordinates")
+                return matrix
+
+            if len(points) < rows * cols:
+                pts = np.array(list(points.keys()))
+                vals = np.array(list(points.values()))
+                grid_r, grid_c = np.mgrid[0:rows, 0:cols]
+                filled = griddata(pts, vals, (grid_r, grid_c), method="linear")
+                nearest = griddata(pts, vals, (grid_r, grid_c), method="nearest")
+                filled = np.where(np.isnan(filled), nearest, filled)
+                for r in range(rows):
+                    for c in range(cols):
+                        matrix[r][c] = float(filled[r][c])
+            else:
+                for (r, c), elevation in points.items():
+                    matrix[r][c] = elevation
+        else:
+            for r in range(rows):
+                for c in range(cols):
+                    matrix[r][c] = random.randint(self.bottom_range, self.top_range)
+
+        self.set_range_from_matrix(matrix)
         return matrix
 
+    def set_range_from_matrix(self, matrix):
+        low = min(min(row) for row in matrix)
+        high = max(max(row) for row in matrix)
+        if high == low:
+            high = low + 1  # avoid a zero-width range
+
+        self.min_elevation = low
+        self.max_elevation = high
+        self.bottom_range = low
+        self.top_range = high
+
     def create_heat_map(
-        self,
-        twod_array,
-        output_file="output.png",
-        img_name="BIR_TIFF.png"
+        self
     ):
-        img = Image.open(img_name)
+        img = Image.open(self.img_name)
         img = img.convert("RGBA")
+
         self.width, self.height = img.size
+        
 
-        self.filterMatrix = self.create_filter(twod_array)
-
-        overlay = Image.new("RGBA", img.size, (0, 0, 0))
-
-        result = Image.alpha_composite(
-            img,
-            self.RGB_Set(
-                overlay,
-                self.height,
-                self.width,
-                self.filterMatrix,
-                self.bottom_range,
-                self.top_range
-            )
-        )
-
-        result.save(output_file)
-
-        return self.filterMatrix
-
-    # Sets each overlay pixel to an RGB value based on the range.
-    @staticmethod
-    def RGB_Set(overlay, height, width, new_array, bottom, top):
-        pixels_over = overlay.load()
-
-        for y in range(0, height - 1):
-            for x in range(0, width):
-                try:
-                    charge = new_array[x][y]
-                    total = (top - bottom)
-                except Exception as e:
-                    print(y, x)
-
-                if charge < 0.01 * total + bottom:
-                    red = 127
-                    green = 127
-                    blue = 127
-
-                elif charge < 0.25 * total + bottom:
-                    red = 0
-                    green = int(
-                        charge / (0.25 * total + bottom) * 255
-                    )
-                    blue = 255
-
-                elif charge < 0.5 * total + bottom:
-                    red = 0
-                    green = 255
-                    blue = int(
-                        -1 * (
-                            (charge - (0.25 * total + bottom))
-                            / (0.25 * total + bottom) + 1
-                        ) * 255
-                    )
-
-                elif charge < 0.75 * total + bottom:
-                    red = int(
-                        (
-                            (charge - (0.5 * total + bottom))
-                            / (0.25 * total + bottom)
-                        ) * 255
-                    )
-                    green = 255
-                    blue = 0
-
-                else:
-                    red = 255
-                    green = int(
-                        (
-                            -1 * (
-                                (charge - (0.75 * total + bottom))
-                                / (0.25 * total + bottom)
-                            ) + 1
-                        ) * 255
-                    )
-                    blue = 0
-
-                pixels_over[x, y] = (red, green, blue, 100)
-
-        return overlay
-
-    def update_filter(self, x, y, amt):
-        for i in range(x - 2, x + 3):
-            for j in range(y - 2, y + 3):
-                self.filterMatrix[j][i] += amt * (
-                    math.pow(
-                        2,
-                        -0.5 * (abs(i - x) + abs(j - y))
-                    )
-                )
-
-        img = Image.open(self.output_file)
-        img = img.convert("RGBA")
-        self.width, self.height = img.size
-        overlay = Image.new("RGBA", img.size, (0, 0, 0))
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
 
         result = Image.alpha_composite(
             img,
@@ -269,37 +240,65 @@ class HeatMap:
 
         return self.filterMatrix
 
+    # Sets each overlay pixel to an RGB value based on the range.
     @staticmethod
-    def spread(twod_array, y, x):
-        break_again = False
-        sum = 0
+    def RGB_Set(overlay, height, width, new_array, bottom, top):
+        pixels_over = overlay.load()
+        total = max(top - bottom, 1)
+        rows, cols = len(new_array), len(new_array[0])
 
+        for y in range(min(height, cols)):
+            for x in range(min(width, rows)):
+                frac = (new_array[x][y] - bottom) / total
+
+                if frac < 0.01:
+                    red, green, blue = 127, 127, 127
+                elif frac < 0.25:
+                    red, green, blue = 0, int(frac / 0.25 * 255), 255
+                elif frac < 0.5:
+                    red, green, blue = 0, 255, int((1 - (frac - 0.25) / 0.25) * 255)
+                elif frac < 0.75:
+                    red, green, blue = int((frac - 0.5) / 0.25 * 255), 255, 0
+                else:
+                    red = 255
+                    green = max(0, int((1 - (frac - 0.75) / 0.25) * 255))
+                    blue = 0
+
+                pixels_over[x, y] = (red, green, blue, 100)
+
+        return overlay
+
+    def update_filter(self, x, y, amt):
         for i in range(x - 2, x + 3):
             for j in range(y - 2, y + 3):
-                try:
-                    if (
-                        i >= 0
-                        and j >= 0
-                        and i < len(twod_array)
-                        and j < len(twod_array)
-                    ):  
-                        sum += twod_array[j][i] * float((
-                            math.pow(
-                                2,
-                                -0.5 * (abs(i - x) + abs(j - y))
-                            )
-                        ))
-                except Exception as e:
-                    print(e)
-                    # print("coordinates", j, i)
-                    pass
-
-            if break_again:
-                break
-
-        avg = sum // 9
-
-        return avg
+                self.filterMatrix[i][j] += amt * (
+                    math.pow(
+                        2,
+                        -0.5 * (abs(i - x) + abs(j - y))
+                    )
+                )
+ 
+        img = Image.open(self.output_file)
+        img = img.convert("RGBA")
+        self.width, self.height = img.size
+        overlay = Image.new("RGBA", img.size, (0, 0, 0))
+ 
+        result = Image.alpha_composite(
+            img,
+            self.RGB_Set(
+                overlay,
+                self.height,
+                self.width,
+                self.filterMatrix,
+                self.bottom_range,
+                self.top_range
+            )
+        )
+ 
+        result.save(self.output_file)
+ 
+        return self.filterMatrix
+ 
 
     @property
     def CSV_PATH(self):
@@ -309,6 +308,7 @@ class HeatMap:
     def CSV_PATH(self, value):
         self._CSV_PATH = value
 
+
     @property
     def filterMatrix(self):
         return self._filterMatrix
@@ -316,6 +316,7 @@ class HeatMap:
     @filterMatrix.setter
     def filterMatrix(self, value):
         self._filterMatrix = value
+
 
     @property
     def originalTrack(self):
@@ -325,6 +326,7 @@ class HeatMap:
     def originalTrack(self, value):
         self._originalTrack = value
 
+
     @property
     def originalTrack_name(self):
         return self._originalTrack_name
@@ -332,6 +334,16 @@ class HeatMap:
     @originalTrack_name.setter
     def originalTrack_name(self, value):
         self._originalTrack_name = value
+
+
+    @property
+    def output_file(self):
+        return self._output_file
+
+    @output_file.setter
+    def output_file(self, value):
+        self._output_file = value
+
 
     @property
     def heatMap(self):
@@ -341,6 +353,7 @@ class HeatMap:
     def heatMap(self, value):
         self._heatMap = value
 
+
     @property
     def dataType(self):
         return self._dataType
@@ -348,6 +361,87 @@ class HeatMap:
     @dataType.setter
     def dataType(self, value):
         self._dataType = value
+
+
+    @property
+    def left_bound(self):
+        return self._left_bound
+
+    @left_bound.setter
+    def left_bound(self, value):
+        self._left_bound = value
+
+
+    @property
+    def top_bound(self):
+        return self._top_bound
+
+    @top_bound.setter
+    def top_bound(self, value):
+        self._top_bound = value
+
+
+    @property
+    def row_count(self):
+        return self._row_count
+
+    @row_count.setter
+    def row_count(self, value):
+        self._row_count = value
+
+
+    @property
+    def column_count(self):
+        return self._column_count
+
+    @column_count.setter
+    def column_count(self, value):
+        self._column_count = value
+
+
+    @property
+    def bottom_range(self):
+        return self._bottom_range
+
+    @bottom_range.setter
+    def bottom_range(self, value):
+        self._bottom_range = value
+
+
+    @property
+    def top_range(self):
+        return self._top_range
+
+    @top_range.setter
+    def top_range(self, value):
+        self._top_range = value
+
+
+    @property
+    def width(self):
+        return self._width
+
+    @width.setter
+    def width(self, value):
+        self._width = value
+
+
+    @property
+    def height(self):
+        return self._height
+
+    @height.setter
+    def height(self, value):
+        self._height = value
+
+
+    @property
+    def img_name(self):
+        return self._img_name
+
+    @img_name.setter
+    def img_name(self, value):
+        self._img_name = value
 
     @property
     def min_elevation(self):
@@ -365,24 +459,39 @@ class HeatMap:
     def max_elevation(self, value):
         self._max_elevation = value
 
+def random_coords():
+    Top = 46.42361754
+    Bottom = 46.40898986
+    Left = -94.28528025
+    Right = -94.26578155
+    return [(random.uniform(46.40898986,46.42361754), random.uniform(-94.28528025,-94.26578155)) for x in range(200)]
 
-# Heatmap_inst1 = HeatMap(
-#     "./BIR_CSV.csv",
-#     "./BIR_CSV.csv",
-#     "BIr",
-#     None,
-#     "Charge",
-#     0,
-#     100,
-#     "BIR_TIFF.tiff"
-# )
 
-# HeatMap.matrix_test(Heatmap_inst1)
-# Heatmap_inst1.create_filter(
-#     Heatmap_inst1.filterMatrix
-# )
+Heatmap_inst1 = HeatMap(
+            originalTrack =  "./OIR_CSV.csv",
+            output_file = "./OIR_TIFF-heatmap.tiff",
+            originalTrack_name = "OIR",
+            heatMap = None,
+            dataType = "Elevation",
+            bottom_range = 0,
+            top_range = 1000,
+            img_name = "BIR_TIFF.tiff"
+)
 
-# x, y = HeatMap.coordinate_finder(Heatmap_inst1, 46.416981, -94.276917)
+# changes the tuples in the matrix to int (for create_filter and update_filter)
+HeatMap.matrix_test(Heatmap_inst1, path_elevation="./OIR_ELEV_CSV.csv")
 
-# Heatmap_inst1.update_filter(x, y, 50)
+# create_filter only creates the matrix that the update_filter will read and assign RGB_val
+Heatmap_inst1.create_filter(
+    Heatmap_inst1.filterMatrix
+)
 
+Heatmap_inst1.create_heat_map()
+# for x_coord, y_coord in random_coords():
+    
+#     x, y = HeatMap.coordinate_finder(Heatmap_inst1, x_coord, y_coord)
+#     if x == None or y == None:
+#         continue
+
+#     #Produces updates the actual img
+#     Heatmap_inst1.update_filter(x, y, 50)
