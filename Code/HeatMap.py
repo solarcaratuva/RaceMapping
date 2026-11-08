@@ -1,11 +1,9 @@
 from PIL import Image
 import csv
 import math
-import sys
 import utm
 import random
 import copy
-import traceback
 import numpy as np
 from scipy.interpolate import griddata
 
@@ -39,43 +37,66 @@ class HeatMap:
         self.img_name = img_name
 
         
-        self.create_matrix()
         self.CSV_to_MATRIX()
 
-    # Creates a list of [0, 0] for all pixels.
-    # Saves leftmost bound, topmost bound, row count, and column count.
-    def create_matrix(self):
-        CSV_CONVERTED_2D = []
+        
 
-        with open(self.CSV_PATH, "r") as f:
-            data = csv.reader(f)
+    
+    # Updates each matrix location from None to a tuple describing the appropriate coordinate location (x, y).
+    # updates the self.filterMatrix attribute to matrix.
+    # returns matrix.
+    # updates row_count, column_count, left_bound, and top_bound attributes
+    def CSV_to_MATRIX(self):
+            # Iterates through track CSV, finds width and height of track image (takes max dimension of the CSV or img file to verify bounds).
+            with open(self.CSV_PATH, "r", newline="") as f:
+                rows = [row for row in csv.reader(f) if row]
+    
+            max_col = 0
+            max_row = 0
+            if not rows:
+                return []
+            
+            for row in rows:
+                try:
+                    if type(int(row[0])) != type("str"):
+    
+                        max_col = max(int(row[5]), max_col)
+                        max_row = max(int(row[6]), max_row)
+                except Exception as e:
+                    pass
+            with Image.open(self.img_name) as img:
+                max_row = max(max_row, img.size[1] - 1)
+                max_col = max(max_col, img.size[0] - 1)
+                
+            # Initializes empty matrix of found dimensions.
+            matrix = [
+                [None for _ in range(max_col + 1)]
+                for _ in range(max_row + 1)
+            ]
+            
+            self.row_count = max_row + 1
+            self.column_count = max_col + 1
 
-            for row in data:
-                CSV_CONVERTED_2D.append([0, 0])
-
-                if row[5:] == ['0', '1']:
-                    self.row_count = int(row[0]) - 1
-
+            for row in rows:
                 if row[0] == '1':
                     self.left_bound = float(row[1])
                     self.top_bound = float(row[2])
+                try:
+                    if type(int(row[0])) != type("str"):
+                        #change depending on the csv file
+                        x = float(row[1])
+                        y = float(row[2])
+                        col = int(row[5])
+                        r = int(row[6])
+                        matrix[r][col] = (x, y)
+                    
+                except Exception as e:
+                    pass
+
+            self.filterMatrix = matrix
+            return matrix
 
 
-        CSV_CONVERTED_2D.pop()  # Exclude header row
-        self.column_count = len(CSV_CONVERTED_2D) // self.row_count
-
-        return CSV_CONVERTED_2D
-
-    def create_filter(self, twod_array):
-        new_array = copy.deepcopy(twod_array)
-        for y in range(len(twod_array)):
-            for x in range(len(twod_array[0])):
-                new_array[y][x] = self.spread(twod_array, y, x)
-        self.filterMatrix = new_array
-        self.set_range_from_matrix(new_array)
-        return new_array
-
-    
     @staticmethod
     def spread(twod_array, y, x):
         total = 0.0
@@ -86,50 +107,18 @@ class HeatMap:
                     w = math.pow(2, -0.5 * (abs(i - x) + abs(j - y)))
                     total += twod_array[j][i] * w
                     weight_sum += w
+
         return total / weight_sum
-
     
-    def CSV_to_MATRIX(self):
-        with open(self.CSV_PATH, "r", newline="") as f:
-            rows = [row for row in csv.reader(f) if row]
+    def create_filter(self, twod_array):
+        new_array = copy.deepcopy(twod_array)
+        for y in range(len(twod_array)):
+            for x in range(len(twod_array[0])):
+                new_array[y][x] = self.spread(twod_array, y, x)
+        self.filterMatrix = new_array
+        self.set_range_from_matrix(new_array)
+        return new_array
 
-        max_col = 0
-        max_row = 0
-        if not rows:
-            return []
-        
-        for row in rows:
-            try:
-                if type(int(row[0])) != type("str"):
-
-                    max_col = max(int(row[5]), max_col)
-                    max_row = max(int(row[6]), max_row)
-            except Exception as e:
-                pass
-        with Image.open(self.img_name) as img:
-            max_row = max(max_row, img.size[0] - 1)
-            max_col = max(max_col, img.size[1] - 1)
-        matrix = [
-            [None for _ in range(max_col + 1)]
-            for _ in range(max_row + 1)
-        ]
-        
-        self.row_count = max_row + 1
-        self.column_count = max_col + 1
-
-        for row in rows:
-            try:
-                if type(int(row[0])) != type("str"):
-                    #change depending on the csv file
-                    x = float(row[1])
-                    y = float(row[2])
-                    col = int(row[5])
-                    r = int(row[6])
-                    matrix[r][col] = (x, y)
-            except Exception as e:
-                pass
-        self.filterMatrix = matrix
-        return matrix
 
     # Given coordinates in bounds, locate row and column numbers.
     def coordinate_finder(self, lat, lon):
@@ -149,57 +138,104 @@ class HeatMap:
         else:
             return (None, None)
 
-
+    
     def matrix_test(self, path_elevation=None):
+        # Get the matrix stored in the object
         matrix = self.filterMatrix
+
+        # Check whether the matrix is empty
         if not matrix:
             print("Empty matrix")
             return []
 
+        # Get the number of rows and columns in the matrix
         rows, cols = len(matrix), len(matrix[0])
 
+        # If an elevation file is provided, populate the matrix using its data
         if path_elevation:
+            # Dictionary to store elevation values using matrix coordinates (row, column)
             points = {}
+
+            # Open the elevation CSV file for reading
             with open(path_elevation, "r", newline="", encoding="utf-8-sig") as f:
                 reader = csv.reader(f)
-                next(reader, None)  # skip header
 
+                # Skip the first row because it contains column headers
+                next(reader, None)
+
+                # Read each row in the CSV file
                 for row in reader:
+                    # Skip empty rows
                     if not row:
                         continue
+
+                    # Extract elevation, longitude, and latitude from the CSV columns
                     elevation = float(row[1])
                     lon = float(row[2])
                     lat = float(row[3])
 
+                    # Convert geographic coordinates into matrix indices
                     r, c = self.coordinate_finder(lat, lon)
+
+                    # Ignore points that fall outside the matrix boundaries
                     if r is None or c is None or r >= rows or c >= cols:
                         continue
+
+                    # Store the elevation at its corresponding matrix position
                     points[(r, c)] = elevation
 
             print("Placed", len(points), "points")
+
+            # Check whether any elevation points were successfully mapped
             if not points:
                 print("No points landed in the matrix; check bounds/coordinates")
                 return matrix
 
+            # If some matrix cells are missing elevation values, interpolate them
             if len(points) < rows * cols:
+
+                # Convert the matrix coordinates and elevation values into NumPy arrays
                 pts = np.array(list(points.keys()))
                 vals = np.array(list(points.values()))
+
+                # Generate coordinate grids covering every matrix cell
                 grid_r, grid_c = np.mgrid[0:rows, 0:cols]
+
+                # Apply linear interpolation to estimate missing elevation values
                 filled = griddata(pts, vals, (grid_r, grid_c), method="linear")
+
+                # Apply nearest-neighbor interpolation as a fallback
+                # for cells where linear interpolation produces NaN values
                 nearest = griddata(pts, vals, (grid_r, grid_c), method="nearest")
+
+                # Replace NaN values in the linear interpolation results
+                # with the corresponding nearest-neighbor values
                 filled = np.where(np.isnan(filled), nearest, filled)
+
+                # Copy the interpolated elevation values into the original matrix
                 for r in range(rows):
                     for c in range(cols):
                         matrix[r][c] = float(filled[r][c])
+
             else:
+                # If every matrix cell has an elevation point,
+                # directly assign the elevation values without interpolation
                 for (r, c), elevation in points.items():
                     matrix[r][c] = elevation
+
         else:
+            # If no elevation file is provided, fill the matrix with random values
+            # between the configured minimum and maximum elevation ranges
             for r in range(rows):
                 for c in range(cols):
-                    matrix[r][c] = random.randint(self.bottom_range, self.top_range)
+                    matrix[r][c] = random.randint(
+                        self.bottom_range,
+                        self.top_range
+                    )
 
+        # Update the object's minimum and maximum range using the populated matrix
         self.set_range_from_matrix(matrix)
+
         return matrix
 
     def set_range_from_matrix(self, matrix):
@@ -267,7 +303,7 @@ class HeatMap:
                 pixels_over[x, y] = (red, green, blue, 100)
 
         return overlay
-
+    
     def update_filter(self, x, y, amt):
         for i in range(x - 2, x + 3):
             for j in range(y - 2, y + 3):
@@ -487,6 +523,7 @@ Heatmap_inst1.create_filter(
 )
 
 Heatmap_inst1.create_heat_map()
+
 # for x_coord, y_coord in random_coords():
     
 #     x, y = HeatMap.coordinate_finder(Heatmap_inst1, x_coord, y_coord)
