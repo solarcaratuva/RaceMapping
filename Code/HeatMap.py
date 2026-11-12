@@ -1,11 +1,9 @@
 from PIL import Image
 import csv
 import math
-import sys
 import utm
 import random
 import copy
-import traceback
 import numpy as np
 from scipy.interpolate import griddata
 
@@ -39,188 +37,242 @@ class HeatMap:
         self.img_name = img_name
 
         
-        self.create_matrix()
         self.CSV_to_MATRIX()
 
-    # Creates a list of [0, 0] for all pixels.
-    # Saves leftmost bound, topmost bound, row count, and column count.
-    def create_matrix(self):
-        CSV_CONVERTED_2D = []
+        
+    # returns and updates self.filterMatrix as a matrix populated with a coordinate tuple (x,y) for all points in a given CSV.
+    def CSV_to_MATRIX(self):
+            # Iterates through track CSV, finds width and height of track image (takes max dimension of the CSV or img file to verify bounds).
+            with open(self.CSV_PATH, "r", newline="") as f:
+                rows = [row for row in csv.reader(f) if row]
+            max_col = 0
+            max_row = 0
+            if not rows:
+                return []            
+            for row in rows:
+                try:
+                    if type(int(row[0])) != type("str"):
+                        max_col = max(int(row[5]), max_col)
+                        max_row = max(int(row[6]), max_row)
+                except Exception as e:
+                    pass
+            with Image.open(self.img_name) as img:
+                max_row = max(max_row, img.size[1] - 1)
+                max_col = max(max_col, img.size[0] - 1)
 
-        with open(self.CSV_PATH, "r") as f:
-            data = csv.reader(f)
+            # Initializes empty matrix of found dimensions.
+            matrix = [
+                [None for _ in range(max_col + 1)]
+                for _ in range(max_row + 1)
+            ]
 
-            for row in data:
-                CSV_CONVERTED_2D.append([0, 0])
+            # Updates row_count & column_count
+            self.row_count = max_row + 1
+            self.column_count = max_col + 1
 
-                if row[5:] == ['0', '1']:
-                    self.row_count = int(row[0]) - 1
-
+            # Updates left_bound and top_bound attributes
+            # Updates each matrix location from None to a tuple describing the appropriate coordinate location (x, y).
+            for row in rows:
                 if row[0] == '1':
                     self.left_bound = float(row[1])
                     self.top_bound = float(row[2])
+                try:
+                    if type(int(row[0])) != type("str"):
+                        #change depending on the csv file
+                        x = float(row[1])
+                        y = float(row[2])
+                        col = int(row[5])
+                        r = int(row[6])
+                        matrix[r][col] = (x, y)                    
+                except Exception as e:
+                    pass           
+                
+            # Updates the self.filterMatrix attribute to matrix.
+            # Returns matrix.
+            self.filterMatrix = matrix
+            return matrix
 
-
-        CSV_CONVERTED_2D.pop()  # Exclude header row
-        self.column_count = len(CSV_CONVERTED_2D) // self.row_count
-
-        return CSV_CONVERTED_2D
-
-    def create_filter(self, twod_array):
-        new_array = copy.deepcopy(twod_array)
-        for y in range(len(twod_array)):
-            for x in range(len(twod_array[0])):
-                new_array[y][x] = self.spread(twod_array, y, x)
-        self.filterMatrix = new_array
-        self.set_range_from_matrix(new_array)
-        return new_array
-
-    
+    # For given matrix element (coordinate), returns weighted average value for that point, based on surrounding points
     @staticmethod
     def spread(twod_array, y, x):
         total = 0.0
         weight_sum = 0.0
+        # Iterates through all points in a 2 pixel radius from the input coordinates, if they are within bounds.
         for i in range(x - 2, x + 3):
             for j in range(y - 2, y + 3):
                 if 0 <= i < len(twod_array[0]) and 0 <= j < len(twod_array):
+                    # Calculates intensity multipliers for each iterated point in range; intensity has base 2 exponential decay per pixels away from center coord.
                     w = math.pow(2, -0.5 * (abs(i - x) + abs(j - y)))
+
+                    # Calculates sum of all intensity values in the 2 pixel radius.
                     total += twod_array[j][i] * w
+
+                    # Calculates sum of all intensity multipliers (weights) 
                     weight_sum += w
+
+        # returns weighted average value for input point
         return total / weight_sum
 
-    
-    def CSV_to_MATRIX(self):
-        with open(self.CSV_PATH, "r", newline="") as f:
-            rows = [row for row in csv.reader(f) if row]
-
-        max_col = 0
-        max_row = 0
-        if not rows:
-            return []
-        
-        for row in rows:
-            try:
-                if type(int(row[0])) != type("str"):
-
-                    max_col = max(int(row[5]), max_col)
-                    max_row = max(int(row[6]), max_row)
-            except Exception as e:
-                pass
-        with Image.open(self.img_name) as img:
-            max_row = max(max_row, img.size[0] - 1)
-            max_col = max(max_col, img.size[1] - 1)
-        matrix = [
-            [None for _ in range(max_col + 1)]
-            for _ in range(max_row + 1)
-        ]
-        
-        self.row_count = max_row + 1
-        self.column_count = max_col + 1
-
-        for row in rows:
-            try:
-                if type(int(row[0])) != type("str"):
-                    #change depending on the csv file
-                    x = float(row[1])
-                    y = float(row[2])
-                    col = int(row[5])
-                    r = int(row[6])
-                    matrix[r][col] = (x, y)
-            except Exception as e:
-                pass
-        self.filterMatrix = matrix
-        return matrix
-
-    # Given coordinates in bounds, locate row and column numbers.
-    def coordinate_finder(self, lat, lon):
-        utm_lat_lon = utm.from_latlon(lat, lon)
-        easting, northing = utm_lat_lon[0], utm_lat_lon[1]
-        
-        
-        row_location = -(northing - self.top_bound) / 3
-        column_location = (easting - self.left_bound) / 3
-        row_location = int(row_location // 1)
-        column_location = int(column_location // 1)
-
-
-        if 0 <= column_location < self.row_count and 0 <= row_location < self.column_count:
-
-            return (int(column_location), int(row_location))
-        else:
-            return (None, None)
-
-
-    def matrix_test(self, path_elevation=None):
-        matrix = self.filterMatrix
-        if not matrix:
-            print("Empty matrix")
-            return []
-
-        rows, cols = len(matrix), len(matrix[0])
-
-        if path_elevation:
-            points = {}
-            with open(path_elevation, "r", newline="", encoding="utf-8-sig") as f:
-                reader = csv.reader(f)
-                next(reader, None)  # skip header
-
-                for row in reader:
-                    if not row:
-                        continue
-                    elevation = float(row[1])
-                    lon = float(row[2])
-                    lat = float(row[3])
-
-                    r, c = self.coordinate_finder(lat, lon)
-                    if r is None or c is None or r >= rows or c >= cols:
-                        continue
-                    points[(r, c)] = elevation
-
-            print("Placed", len(points), "points")
-            if not points:
-                print("No points landed in the matrix; check bounds/coordinates")
-                return matrix
-
-            if len(points) < rows * cols:
-                pts = np.array(list(points.keys()))
-                vals = np.array(list(points.values()))
-                grid_r, grid_c = np.mgrid[0:rows, 0:cols]
-                filled = griddata(pts, vals, (grid_r, grid_c), method="linear")
-                nearest = griddata(pts, vals, (grid_r, grid_c), method="nearest")
-                filled = np.where(np.isnan(filled), nearest, filled)
-                for r in range(rows):
-                    for c in range(cols):
-                        matrix[r][c] = float(filled[r][c])
-            else:
-                for (r, c), elevation in points.items():
-                    matrix[r][c] = elevation
-        else:
-            for r in range(rows):
-                for c in range(cols):
-                    matrix[r][c] = random.randint(self.bottom_range, self.top_range)
-
-        self.set_range_from_matrix(matrix)
-        return matrix
-
+    # Given matrix of weighted average intensities/values, finds the min and max values to save as attributes. 
     def set_range_from_matrix(self, matrix):
+        # finds min and max values of whole matrix
         low = min(min(row) for row in matrix)
         high = max(max(row) for row in matrix)
         if high == low:
-            high = low + 1  # avoid a zero-width range
-
+            # Avoid a zero-width range
+            high = low + 1
+        # Saves min and max as attributes
         self.min_elevation = low
         self.max_elevation = high
         self.bottom_range = low
         self.top_range = high
 
-    def create_heat_map(
-        self
-    ):
+    # Uses spread() on all points in the matrix, converts filterMatrix data from coordinate tuples to intensities
+    def create_filter(self, twod_array):
+        new_array = copy.deepcopy(twod_array)
+
+        # Iterates through all matrix elements
+        for y in range(len(twod_array)):
+            for x in range(len(twod_array[0])):
+                # Calls spread() to get weighted average intensity for each point
+                new_array[y][x] = self.spread(twod_array, y, x)
+
+        # Replaces per-point array of coordinate tuples (x,y) with per-point array of weighted average intensities.
+        self.filterMatrix = new_array
+
+        # Saves min and max values/intensities
+        self.set_range_from_matrix(new_array)
+        return new_array
+
+
+    # Given coordinates in bounds, find row and column indexes.
+    def coordinate_finder(self, lat, lon):
+        # Converts degree-based coordinates to meter-based (utm) coordinates
+        utm_lat_lon = utm.from_latlon(lat, lon)
+        easting, northing = utm_lat_lon[0], utm_lat_lon[1]
+
+        # Takes UTM coordinates, subtracts from the minimum (top/left) bounds, and divides by 3 (meter intervals)
+        row_location = -(northing - self.top_bound) / 3
+        column_location = (easting - self.left_bound) / 3
+
+        # Truncates and converts to integer for indexing.
+        row_location = int(row_location // 1)
+        column_location = int(column_location // 1)
+
+        # Returns row and column indexes in a tuple, if they're in bounds.
+        if 0 <= column_location < self.row_count and 0 <= row_location < self.column_count:
+            return (int(column_location), int(row_location))
+        else:
+            return (None, None)
+
+    # Returns a same-size matrix of elevation values (with interpolated values between if not enough per pixel).
+    # If no elevation file given, uses random values.
+    def matrix_test(self, path_elevation=None):
+        # Get the matrix stored in the object
+        matrix = self.filterMatrix
+
+        # Check whether the matrix is empty
+        if not matrix:
+            print("Empty matrix")
+            return []
+
+        # Get the number of rows and columns in the matrix
+        rows, cols = len(matrix), len(matrix[0])
+
+        # If an elevation file is provided, populate the matrix using its data
+        if path_elevation:
+            # Dictionary to store elevation values using matrix coordinates (row, column)
+            points = {}
+
+            # Open the elevation CSV file for reading
+            with open(path_elevation, "r", newline="", encoding="utf-8-sig") as f:
+                reader = csv.reader(f)
+
+                # Skip the first row because it contains column headers
+                next(reader, None)
+
+                # Read each row in the CSV file
+                for row in reader:
+                    # Skip empty rows
+                    if not row:
+                        continue
+
+                    # Extract elevation, longitude, and latitude from the CSV columns
+                    elevation = float(row[1])
+                    lon = float(row[2])
+                    lat = float(row[3])
+
+                    # Convert geographic coordinates into matrix indices
+                    r, c = self.coordinate_finder(lat, lon)
+
+                    # Ignore points that fall outside the matrix boundaries
+                    if r is None or c is None or r >= rows or c >= cols:
+                        continue
+
+                    # Store the elevation at its corresponding matrix position
+                    points[(r, c)] = elevation
+
+            print("Placed", len(points), "points")
+
+            # Check whether any elevation points were successfully mapped
+            if not points:
+                print("No points landed in the matrix; check bounds/coordinates")
+                return matrix
+
+            # If some matrix cells are missing elevation values, interpolate them
+            if len(points) < rows * cols:
+
+                # Convert the matrix coordinates and elevation values into NumPy arrays
+                pts = np.array(list(points.keys()))
+                vals = np.array(list(points.values()))
+
+                # Generate coordinate grids covering every matrix cell
+                grid_r, grid_c = np.mgrid[0:rows, 0:cols]
+
+                # Apply linear interpolation to estimate missing elevation values
+                filled = griddata(pts, vals, (grid_r, grid_c), method="linear")
+
+                # Apply nearest-neighbor interpolation as a fallback
+                # for cells where linear interpolation produces NaN values
+                nearest = griddata(pts, vals, (grid_r, grid_c), method="nearest")
+
+                # Replace NaN values in the linear interpolation results
+                # with the corresponding nearest-neighbor values
+                filled = np.where(np.isnan(filled), nearest, filled)
+
+                # Copy the interpolated elevation values into the original matrix
+                for r in range(rows):
+                    for c in range(cols):
+                        matrix[r][c] = float(filled[r][c])
+
+            else:
+                # If every matrix cell has an elevation point,
+                # directly assign the elevation values without interpolation
+                for (r, c), elevation in points.items():
+                    matrix[r][c] = elevation
+
+        else:
+            # If no elevation file is provided, fill the matrix with random values
+            # between the configured minimum and maximum elevation ranges
+            for r in range(rows):
+                for c in range(cols):
+                    matrix[r][c] = random.randint(
+                        self.bottom_range,
+                        self.top_range
+                    )
+
+        # Update the object's minimum and maximum range using the populated matrix
+        self.set_range_from_matrix(matrix)
+
+        return matrix
+
+
+    # Creates a new overlaying image using RGB_Set() for intensity coloring.
+    def create_heat_map(self):
         img = Image.open(self.img_name)
         img = img.convert("RGBA")
 
         self.width, self.height = img.size
-        
 
         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
 
@@ -240,7 +292,8 @@ class HeatMap:
 
         return self.filterMatrix
 
-    # Sets each overlay pixel to an RGB value based on the range.
+    # Sets each overlay pixel to an RGB value based on the value of each coordinate, relative to the range.
+    # Each new pixel color has an opacity of 100 (out of 255), so original track image can be seen underneath.
     @staticmethod
     def RGB_Set(overlay, height, width, new_array, bottom, top):
         pixels_over = overlay.load()
@@ -475,7 +528,7 @@ Heatmap_inst1 = HeatMap(
             dataType = "Elevation",
             bottom_range = 0,
             top_range = 1000,
-            img_name = "BIR_TIFF.tiff"
+            img_name = "OIR_TIFF.tiff"
 )
 
 # changes the tuples in the matrix to int (for create_filter and update_filter)
@@ -487,6 +540,7 @@ Heatmap_inst1.create_filter(
 )
 
 Heatmap_inst1.create_heat_map()
+
 # for x_coord, y_coord in random_coords():
     
 #     x, y = HeatMap.coordinate_finder(Heatmap_inst1, x_coord, y_coord)
