@@ -40,26 +40,18 @@ class HeatMap:
         self.CSV_to_MATRIX()
 
         
-
-    
-    # Updates each matrix location from None to a tuple describing the appropriate coordinate location (x, y).
-    # updates the self.filterMatrix attribute to matrix.
-    # returns matrix.
-    # updates row_count, column_count, left_bound, and top_bound attributes
+    # returns and updates self.filterMatrix as a matrix populated with a coordinate tuple (x,y) for all points in a given CSV.
     def CSV_to_MATRIX(self):
             # Iterates through track CSV, finds width and height of track image (takes max dimension of the CSV or img file to verify bounds).
             with open(self.CSV_PATH, "r", newline="") as f:
                 rows = [row for row in csv.reader(f) if row]
-    
             max_col = 0
             max_row = 0
             if not rows:
-                return []
-            
+                return []            
             for row in rows:
                 try:
                     if type(int(row[0])) != type("str"):
-    
                         max_col = max(int(row[5]), max_col)
                         max_row = max(int(row[6]), max_row)
                 except Exception as e:
@@ -67,16 +59,19 @@ class HeatMap:
             with Image.open(self.img_name) as img:
                 max_row = max(max_row, img.size[1] - 1)
                 max_col = max(max_col, img.size[0] - 1)
-                
+
             # Initializes empty matrix of found dimensions.
             matrix = [
                 [None for _ in range(max_col + 1)]
                 for _ in range(max_row + 1)
             ]
-            
+
+            # Updates row_count & column_count
             self.row_count = max_row + 1
             self.column_count = max_col + 1
 
+            # Updates left_bound and top_bound attributes
+            # Updates each matrix location from None to a tuple describing the appropriate coordinate location (x, y).
             for row in rows:
                 if row[0] == '1':
                     self.left_bound = float(row[1])
@@ -88,57 +83,90 @@ class HeatMap:
                         y = float(row[2])
                         col = int(row[5])
                         r = int(row[6])
-                        matrix[r][col] = (x, y)
-                    
+                        matrix[r][col] = (x, y)                    
                 except Exception as e:
-                    pass
-
+                    pass           
+                
+            # Updates the self.filterMatrix attribute to matrix.
+            # Returns matrix.
             self.filterMatrix = matrix
             return matrix
 
-
+    # For given matrix element (coordinate), returns weighted average value for that point, based on surrounding points
     @staticmethod
     def spread(twod_array, y, x):
         total = 0.0
         weight_sum = 0.0
+        # Iterates through all points in a 2 pixel radius from the input coordinates, if they are within bounds.
         for i in range(x - 2, x + 3):
             for j in range(y - 2, y + 3):
                 if 0 <= i < len(twod_array[0]) and 0 <= j < len(twod_array):
+                    # Calculates intensity multipliers for each iterated point in range; intensity has base 2 exponential decay per pixels away from center coord.
                     w = math.pow(2, -0.5 * (abs(i - x) + abs(j - y)))
+
+                    # Calculates sum of all intensity values in the 2 pixel radius.
                     total += twod_array[j][i] * w
+
+                    # Calculates sum of all intensity multipliers (weights) 
                     weight_sum += w
 
+        # returns weighted average value for input point
         return total / weight_sum
-    
+
+    # Given matrix of weighted average intensities/values, finds the min and max values to save as attributes. 
+    def set_range_from_matrix(self, matrix):
+        # finds min and max values of whole matrix
+        low = min(min(row) for row in matrix)
+        high = max(max(row) for row in matrix)
+        if high == low:
+            # Avoid a zero-width range
+            high = low + 1
+        # Saves min and max as attributes
+        self.min_elevation = low
+        self.max_elevation = high
+        self.bottom_range = low
+        self.top_range = high
+
+    # Uses spread() on all points in the matrix, converts filterMatrix data from coordinate tuples to intensities
     def create_filter(self, twod_array):
         new_array = copy.deepcopy(twod_array)
+
+        # Iterates through all matrix elements
         for y in range(len(twod_array)):
             for x in range(len(twod_array[0])):
+                # Calls spread() to get weighted average intensity for each point
                 new_array[y][x] = self.spread(twod_array, y, x)
+
+        # Replaces per-point array of coordinate tuples (x,y) with per-point array of weighted average intensities.
         self.filterMatrix = new_array
+
+        # Saves min and max values/intensities
         self.set_range_from_matrix(new_array)
         return new_array
 
 
-    # Given coordinates in bounds, locate row and column numbers.
+    # Given coordinates in bounds, find row and column indexes.
     def coordinate_finder(self, lat, lon):
+        # Converts degree-based coordinates to meter-based (utm) coordinates
         utm_lat_lon = utm.from_latlon(lat, lon)
         easting, northing = utm_lat_lon[0], utm_lat_lon[1]
-        
-        
+
+        # Takes UTM coordinates, subtracts from the minimum (top/left) bounds, and divides by 3 (meter intervals)
         row_location = -(northing - self.top_bound) / 3
         column_location = (easting - self.left_bound) / 3
+
+        # Truncates and converts to integer for indexing.
         row_location = int(row_location // 1)
         column_location = int(column_location // 1)
 
-
+        # Returns row and column indexes in a tuple, if they're in bounds.
         if 0 <= column_location < self.row_count and 0 <= row_location < self.column_count:
-
             return (int(column_location), int(row_location))
         else:
             return (None, None)
 
-    
+    # Returns a same-size matrix of elevation values (with interpolated values between if not enough per pixel).
+    # If no elevation file given, uses random values.
     def matrix_test(self, path_elevation=None):
         # Get the matrix stored in the object
         matrix = self.filterMatrix
@@ -238,25 +266,13 @@ class HeatMap:
 
         return matrix
 
-    def set_range_from_matrix(self, matrix):
-        low = min(min(row) for row in matrix)
-        high = max(max(row) for row in matrix)
-        if high == low:
-            high = low + 1  # avoid a zero-width range
 
-        self.min_elevation = low
-        self.max_elevation = high
-        self.bottom_range = low
-        self.top_range = high
-
-    def create_heat_map(
-        self
-    ):
+    # Creates a new overlaying image using RGB_Set() for intensity coloring.
+    def create_heat_map(self):
         img = Image.open(self.img_name)
         img = img.convert("RGBA")
 
         self.width, self.height = img.size
-        
 
         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
 
@@ -276,7 +292,8 @@ class HeatMap:
 
         return self.filterMatrix
 
-    # Sets each overlay pixel to an RGB value based on the range.
+    # Sets each overlay pixel to an RGB value based on the value of each coordinate, relative to the range.
+    # Each new pixel color has an opacity of 100 (out of 255), so original track image can be seen underneath.
     @staticmethod
     def RGB_Set(overlay, height, width, new_array, bottom, top):
         pixels_over = overlay.load()
@@ -303,7 +320,7 @@ class HeatMap:
                 pixels_over[x, y] = (red, green, blue, 100)
 
         return overlay
-    
+
     def update_filter(self, x, y, amt):
         for i in range(x - 2, x + 3):
             for j in range(y - 2, y + 3):
@@ -511,7 +528,7 @@ Heatmap_inst1 = HeatMap(
             dataType = "Elevation",
             bottom_range = 0,
             top_range = 1000,
-            img_name = "BIR_TIFF.tiff"
+            img_name = "OIR_TIFF.tiff"
 )
 
 # changes the tuples in the matrix to int (for create_filter and update_filter)
